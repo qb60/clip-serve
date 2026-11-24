@@ -24,11 +24,17 @@ git remote add origin https://github.com/OWNER/REPO.git
 git push -u origin main
 ```
 
-After CI passes, push a tag matching the version in `Cargo.toml`. For later releases, update the package version and `Cargo.lock` before tagging.
+On `main`, use the release script with Bash, Git, and Cargo. It updates `Cargo.toml` and `Cargo.lock`, commits the version change, and creates the annotated tag locally.
 
 ```bash
-git tag -a v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
+scripts/release.sh 0.1.3
+git push origin main
+```
+
+After CI passes, push the tag printed by the script.
+
+```bash
+git push origin v0.1.3
 ```
 
 The release workflow publishes `ClipServe.exe`, `ClipServe-windows-x64.zip`, and `SHA256SUMS.txt` under **Releases**.
