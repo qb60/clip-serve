@@ -175,32 +175,45 @@ impl Editor {
                                 ("Maximum images", &mut self.max_images),
                             ] {
                                 let label = ui.label(label);
-                                ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY))
-                                    .labelled_by(label.id);
+                                ui.add(
+                                    egui::TextEdit::singleline(value).desired_width(f32::INFINITY),
+                                )
+                                .labelled_by(label.id);
                                 ui.end_row();
                             }
                         });
                     ui.add_space(8.0);
-                    ui.checkbox(&mut self.capture_on_startup, "Enable capture when ClipServe starts");
+                    ui.checkbox(
+                        &mut self.capture_on_startup,
+                        "Enable capture when ClipServe starts",
+                    );
                     ui.checkbox(&mut self.start_with_windows, "Start with Windows");
                     ui.separator();
-                    ui.label("URL preview");
-                    match self.config() {
+                    let config = self.config();
+                    let endpoint_changed = config
+                        .as_ref()
+                        .is_ok_and(|config| config.endpoint() != self.saved.endpoint());
+                    ui.horizontal(|ui| {
+                        ui.label("URL preview");
+                        if self.pending.is_some() {
+                            ui.spinner();
+                        } else if endpoint_changed {
+                            ui.weak("Existing URLs may stop working.");
+                        } else if !self.failed && !self.message.is_empty() {
+                            ui.weak(&self.message);
+                        }
+                    });
+                    match config {
                         Ok(config) => {
                             ui.monospace(store::url(config.endpoint(), "k7Fp2xQ9"));
-                            if config.endpoint() != self.saved.endpoint() {
-                                ui.label("Changing the address or port can make previously copied URLs unreachable.");
-                            }
                         }
-                        Err(_) => { ui.label("Enter a valid address, port and image count."); }
+                        Err(_) => {
+                            ui.label("Enter a valid address, port and image count.");
+                        }
                     }
                 });
-                if self.pending.is_some() {
-                    ui.spinner();
-                } else if self.failed {
+                if self.failed && !self.message.is_empty() {
                     ui.colored_label(ui.visuals().error_fg_color, &self.message);
-                } else if !self.message.is_empty() {
-                    ui.label(&self.message);
                 }
             });
         });
