@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io,
     net::SocketAddrV4,
     sync::{
@@ -8,6 +9,8 @@ use std::{
 };
 
 use image::{ExtendedColorType, ImageEncoder, codecs::png};
+
+use crate::store::StoredImage;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Capture {
@@ -110,6 +113,31 @@ pub fn decode_png(png: &[u8]) -> io::Result<image::RgbaImage> {
         .into_rgba8())
 }
 
+pub fn preview_png(png: &[u8]) -> io::Result<image::RgbaImage> {
+    const MAX_SIDE: u32 = 2048;
+    let pixels = decode_png(png)?;
+    if pixels.width().max(pixels.height()) <= MAX_SIDE {
+        return Ok(pixels);
+    }
+    Ok(image::DynamicImage::ImageRgba8(pixels)
+        .thumbnail(MAX_SIDE, MAX_SIDE)
+        .into_rgba8())
+}
+
+pub fn prepare_image(width: usize, height: usize, rgba: Cow<'_, [u8]>) -> io::Result<StoredImage> {
+    let png = encode_png(width, height, &rgba)?;
+    let (width, height) = (width as u32, height as u32);
+    // Encoding has already validated the dimensions and buffer length.
+    let pixels = image::RgbaImage::from_raw(width, height, rgba.into_owned()).unwrap();
+    let thumbnail = image::DynamicImage::ImageRgba8(pixels)
+        .thumbnail(width.min(136), height.min(96))
+        .into_rgba8();
+    Ok(StoredImage {
+        png,
+        thumbnail: Arc::new(thumbnail),
+    })
+}
+
 pub fn dibv5(png: &[u8]) -> io::Result<Vec<u8>> {
     const HEADER: usize = 124;
     let pixels = decode_png(png)?;
@@ -200,5 +228,26 @@ mod tests {
         assert!(encode_png(0, 0, &[]).is_err());
         assert!(encode_png(usize::MAX, usize::MAX, &[]).is_err());
         assert!(decode_png(b"not a PNG").is_err());
+    }
+
+    #[test]
+    fn thumbnails_preserve_aspect_ratio_and_leave_original_png_at_full_size() {
+        let pixels = vec![255; 400 * 200 * 4];
+        let stored = prepare_image(400, 200, Cow::Owned(pixels)).unwrap();
+        assert_eq!(stored.thumbnail.dimensions(), (136, 68));
+        assert_eq!(decode_png(&stored.png).unwrap().dimensions(), (400, 200));
+        let small = prepare_image(1, 2, Cow::Borrowed(&[255; 8])).unwrap();
+        assert_eq!(small.thumbnail.dimensions(), (1, 2));
+        assert!(prepare_image(1, 2, Cow::Borrowed(&[255; 4])).is_err());
+    }
+
+    #[test]
+    fn preview_uses_original_pixels_and_caps_long_side() {
+        let small = encode_png(1, 1, &[0, 1, 2, 255]).unwrap();
+        assert_eq!(preview_png(&small).unwrap().as_raw(), &[0, 1, 2, 255]);
+
+        let large = encode_png(4096, 64, &vec![0; 4096 * 64 * 4]).unwrap();
+        assert_eq!(preview_png(&large).unwrap().dimensions(), (2048, 32));
+        assert!(preview_png(b"not a PNG").is_err());
     }
 }

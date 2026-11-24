@@ -11,7 +11,7 @@ use clipserve::{
     capture::{Capture, CaptureState},
     config::{Config, config_path},
     http::Server,
-    store::{SharedStore, Store, url},
+    store::{SharedStore, Store, StoredImage, url},
 };
 use windows::{
     Win32::{
@@ -30,11 +30,10 @@ use windows::{
             Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken},
         },
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, IDYES,
-            KillTimer, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_SETFOREGROUND,
-            MB_YESNO, MSG, MessageBoxW, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-            SetTimer, TranslateMessage, WM_APP, WM_CLIPBOARDUPDATE, WM_TIMER, WNDCLASSW,
-            WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+            KillTimer, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MSG, MessageBoxW, PostMessageW,
+            RegisterClassW, RegisterWindowMessageW, SetTimer, TranslateMessage, WM_APP,
+            WM_CLIPBOARDUPDATE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
         },
     },
     core::{HSTRING, PCWSTR, PWSTR, w},
@@ -43,7 +42,8 @@ use windows::{
 use crate::{
     autostart,
     clipboard::{self, Data, Opened, Prepared, Worker},
-    settings::{Reply, Settings},
+    desktop::{Desktop, View},
+    settings::Reply,
     tray::{Status, Tray},
 };
 
@@ -61,8 +61,7 @@ thread_local! {
 pub enum Action {
     ToggleCapture,
     Copy,
-    Restore,
-    Clear,
+    RecentImages,
     Settings,
     ToggleAutostart,
     Exit,
@@ -70,10 +69,17 @@ pub enum Action {
 
 pub enum Command {
     Tray(Action),
+    Image(ImageAction, String, u32),
+    ClearImages,
     Apply(Config, Reply),
     Prepared(Prepared),
     Error(String),
     HttpStopped,
+}
+
+pub enum ImageAction {
+    Copy,
+    Restore,
 }
 
 #[derive(Clone)]
@@ -306,8 +312,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 }
 
 enum Write {
-    Capture(Capture, Arc<[u8]>),
-    Copy(u32),
+    Capture(Capture, StoredImage),
+    Copy(u32, String),
     Restore(u32, Data),
 }
 
@@ -320,7 +326,7 @@ struct App {
     server: Option<Server>,
     retry: Option<(Write, usize)>,
     worker: Worker,
-    settings: Settings,
+    desktop: Desktop,
     tray: Tray,
     wake: Wake,
 }
@@ -346,17 +352,19 @@ impl App {
             None
         };
         let worker_wake = wake.clone();
+        let store = Arc::new(Mutex::new(Store::new(config.max_images)));
+        let desktop = Desktop::start(wake.clone(), Arc::clone(&store))?;
         let mut app = Self {
             hwnd,
             exe,
             config,
             tray,
-            store: Arc::new(Mutex::new(Store::new(config.max_images))),
+            store,
             state: CaptureState::new(config.capture_on_startup, clipboard::sequence()),
             server: None,
             retry: None,
             worker: Worker::start(move |job| worker_wake.send(Command::Prepared(job)))?,
-            settings: Settings::start(wake.clone())?,
+            desktop,
             wake,
         };
         let bind_error = match app.bind(config) {
@@ -380,6 +388,13 @@ impl App {
         match command {
             Command::Tray(Action::Exit) => return false,
             Command::Tray(action) => self.action(action),
+            Command::Image(action, id, sequence) => self.use_image(action, id, sequence),
+            Command::ClearImages => {
+                self.state
+                    .set_enabled(self.state.enabled, clipboard::sequence());
+                self.cancel_retry();
+                self.store.lock().unwrap().clear();
+            }
             Command::Apply(config, reply) => {
                 let result = self.apply(config);
                 let _ = reply.result.send(result);
@@ -388,7 +403,7 @@ impl App {
             Command::Prepared(Prepared::Capture(job, result)) => {
                 if self.state.validate(job, clipboard::sequence()).is_some() {
                     match result {
-                        Ok(png) => self.commit(Write::Capture(job, png)),
+                        Ok(image) => self.commit(Write::Capture(job, image)),
                         Err(err) => {
                             self.error(&format!("Could not capture the clipboard image.\n\n{err}"))
                         }
@@ -399,9 +414,7 @@ impl App {
                 if sequence == clipboard::sequence() {
                     match result {
                         Ok(data) => self.commit(Write::Restore(sequence, data)),
-                        Err(err) => {
-                            self.error(&format!("Could not restore the latest image.\n\n{err}"))
-                        }
+                        Err(err) => self.error(&format!("Could not restore the image.\n\n{err}")),
                     }
                 }
             }
@@ -423,34 +436,18 @@ impl App {
                 .state
                 .set_enabled(!self.state.enabled, clipboard::sequence()),
             Action::Copy => {
-                let sequence = clipboard::sequence();
-                self.state.set_enabled(self.state.enabled, sequence);
-                self.commit(Write::Copy(sequence));
-            }
-            Action::Restore => {
                 let latest = self.store.lock().unwrap().latest();
                 if let Some(entry) = latest {
-                    let sequence = clipboard::sequence();
-                    self.state.set_enabled(self.state.enabled, sequence);
-                    self.cancel_retry();
-                    self.worker.restore(sequence, entry.png);
+                    self.use_image(ImageAction::Copy, entry.id, clipboard::sequence());
                 }
             }
-            Action::Clear => {
-                if dialog(
-                    Some(self.hwnd),
-                    "Clear all stored images? Their URLs will stop working.",
-                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
-                ) == IDYES
-                {
-                    self.state
-                        .set_enabled(self.state.enabled, clipboard::sequence());
-                    self.cancel_retry();
-                    self.store.lock().unwrap().clear();
+            Action::RecentImages => {
+                if let Err(err) = self.desktop.open(View::RecentImages) {
+                    self.error(&format!("Could not open Recent images.\n\n{err}"));
                 }
             }
             Action::Settings => {
-                if let Err(err) = self.settings.open(self.config) {
+                if let Err(err) = self.desktop.open(View::Settings(self.config)) {
                     self.error(&format!("Could not open Settings.\n\n{err}"));
                 }
             }
@@ -466,6 +463,25 @@ impl App {
                 }
             }
             Action::Exit => unreachable!("Exit is handled by the message loop"),
+        }
+    }
+
+    fn use_image(&mut self, action: ImageAction, id: String, sequence: u32) {
+        if clipboard::sequence() != sequence {
+            return;
+        }
+        let png = self.store.lock().unwrap().get(&id);
+        let Some(png) = png else {
+            self.error("That image is no longer available.");
+            return;
+        };
+        self.state.set_enabled(self.state.enabled, sequence);
+        match action {
+            ImageAction::Copy => self.commit(Write::Copy(sequence, id)),
+            ImageAction::Restore => {
+                self.cancel_retry();
+                self.worker.restore(sequence, png);
+            }
         }
     }
 
@@ -521,10 +537,12 @@ impl App {
 
     fn update_tray(&mut self, force: bool) {
         let count = self.store.lock().unwrap().len();
+        let healthy = self.state.endpoint().is_some();
+        self.desktop.refresh_recent(healthy);
         self.tray.update(
             Status {
                 enabled: self.state.enabled,
-                healthy: self.state.endpoint().is_some(),
+                healthy,
                 count,
                 autostart: self.config.start_with_windows,
             },
@@ -554,7 +572,7 @@ impl App {
         let sequence = clipboard::sequence();
         let current = match &write {
             Write::Capture(job, _) => self.state.validate(*job, sequence).is_some(),
-            Write::Copy(expected) | Write::Restore(expected, _) => *expected == sequence,
+            Write::Copy(expected, _) | Write::Restore(expected, _) => *expected == sequence,
         };
         if !current {
             return;
@@ -581,29 +599,26 @@ impl App {
             return;
         }
         let result: Result<(), String> = match write {
-            Write::Capture(job, png) => {
+            Write::Capture(job, image) => {
                 let Some(endpoint) = self.state.validate(job, sequence) else {
                     return;
                 };
                 let state = &mut self.state;
-                self.store.lock().unwrap().publish(png, |id| {
+                self.store.lock().unwrap().publish(image, |id| {
                     write_data(&opened, Data::text(&url(endpoint, id)), state)
                 })
             }
-            Write::Copy(_) => {
+            Write::Copy(_, id) => {
                 let Some(endpoint) = self.state.endpoint() else {
                     drop(opened);
                     self.error("Could not copy a URL while the HTTP server is unavailable.");
                     return;
                 };
-                let Some(entry) = self.store.lock().unwrap().latest() else {
-                    return;
-                };
-                write_data(
-                    &opened,
-                    Data::text(&url(endpoint, &entry.id)),
-                    &mut self.state,
-                )
+                if self.store.lock().unwrap().get(&id).is_some() {
+                    write_data(&opened, Data::text(&url(endpoint, &id)), &mut self.state)
+                } else {
+                    Err("That image is no longer available.".into())
+                }
             }
             Write::Restore(_, data) => write_data(&opened, Ok(data), &mut self.state),
         };

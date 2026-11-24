@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 
-use clipserve::capture::{Capture, dibv5, encode_png};
+use clipserve::{
+    capture::{Capture, dibv5, prepare_image},
+    store::StoredImage,
+};
 use windows::{
     Win32::{
         Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND},
@@ -118,7 +121,7 @@ enum Job {
 }
 
 pub enum Prepared {
-    Capture(Capture, io::Result<Arc<[u8]>>),
+    Capture(Capture, io::Result<StoredImage>),
     Restore(u32, io::Result<Data>),
 }
 
@@ -201,7 +204,7 @@ impl Drop for Worker {
     }
 }
 
-fn read_image(expected: u32) -> Option<io::Result<Arc<[u8]>>> {
+fn read_image(expected: u32) -> Option<io::Result<StoredImage>> {
     use arboard::Error;
 
     let delays = [15, 35, 75].into_iter().map(Some).chain([None]);
@@ -215,7 +218,7 @@ fn read_image(expected: u32) -> Option<io::Result<Arc<[u8]>>> {
                 if sequence() != expected {
                     return None;
                 }
-                return Some(encode_png(data.width, data.height, &data.bytes));
+                return Some(prepare_image(data.width, data.height, data.bytes));
             }
             Err(Error::ContentNotAvailable) => return None,
             Err(Error::ClipboardOccupied | Error::Unknown { .. }) if delay.is_some() => {

@@ -1,140 +1,9 @@
-use std::{
-    io,
-    sync::{Arc, Mutex, mpsc},
-    thread::{self, JoinHandle},
-};
+use std::sync::mpsc;
 
 use clipserve::{config::Config, store};
 use eframe::egui::{self, Context, ViewportCommand};
-use windows::Win32::{
-    Foundation::{HWND, LPARAM, WPARAM},
-    UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE},
-};
-use winit::{
-    platform::windows::EventLoopBuilderExtWindows,
-    raw_window_handle::{HasWindowHandle, RawWindowHandle},
-};
 
 use crate::app::{Command, Wake};
-
-#[derive(Default)]
-struct Window {
-    busy: bool,
-    exiting: bool,
-    visible: Option<(Context, usize)>,
-}
-
-pub struct Settings {
-    open: Option<mpsc::Sender<Config>>,
-    window: Arc<Mutex<Window>>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Settings {
-    pub fn start(wake: Wake) -> io::Result<Self> {
-        let (open, requests) = mpsc::channel();
-        let window = Arc::new(Mutex::new(Window::default()));
-        let thread_window = Arc::clone(&window);
-        let thread = thread::Builder::new()
-            .name("Settings".into())
-            .spawn(move || {
-                for config in requests {
-                    if thread_window.lock().unwrap().exiting {
-                        break;
-                    }
-                    let result = run(config, &wake, &thread_window);
-                    {
-                        let mut window = thread_window.lock().unwrap();
-                        window.visible = None;
-                        window.busy = false;
-                    }
-                    if let Err(err) = result {
-                        wake.send(Command::Error(format!("Could not open Settings.\n\n{err}")));
-                    }
-                }
-            })?;
-        Ok(Self {
-            open: Some(open),
-            window,
-            thread: Some(thread),
-        })
-    }
-
-    pub fn open(&self, config: Config) -> io::Result<()> {
-        let mut window = self.window.lock().unwrap();
-        if let Some((ctx, _)) = &window.visible {
-            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(ViewportCommand::Focus);
-        } else if !window.busy {
-            self.open
-                .as_ref()
-                .unwrap()
-                .send(config)
-                .map_err(|_| io::Error::other("The Settings thread stopped."))?;
-            window.busy = true;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Settings {
-    fn drop(&mut self) {
-        {
-            let mut window = self.window.lock().unwrap();
-            window.exiting = true;
-            if let Some((_, hwnd)) = &window.visible {
-                close(*hwnd);
-            }
-        }
-        self.open.take();
-        if self.thread.take().unwrap().join().is_err() {
-            log::error!("The Settings thread panicked.");
-        }
-    }
-}
-
-fn close(hwnd: usize) {
-    // PostMessage does not dereference the handle. Windows rejects a closed window.
-    unsafe {
-        let _ = PostMessageW(Some(HWND(hwnd as _)), WM_CLOSE, WPARAM(0), LPARAM(0));
-    }
-}
-
-fn run(config: Config, wake: &Wake, window: &Mutex<Window>) -> eframe::Result {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([480.0, 264.0])
-        .with_resizable(false)
-        .with_maximize_button(false);
-    if let Ok(icon) = eframe::icon_data::from_png_bytes(crate::tray::DISABLED_ICON) {
-        viewport = viewport.with_icon(icon);
-    }
-    let options = eframe::NativeOptions {
-        viewport,
-        centered: true,
-        run_and_return: true,
-        event_loop_builder: Some(Box::new(|builder| {
-            builder.with_any_thread(true);
-        })),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "ClipServe Settings",
-        options,
-        Box::new(|cc| {
-            let handle = cc.window_handle()?;
-            let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-                unreachable!("settings use a Win32 window");
-            };
-            let hwnd = handle.hwnd.get() as usize;
-            let mut window = window.lock().unwrap();
-            window.visible = Some((cc.egui_ctx.clone(), hwnd));
-            if window.exiting {
-                close(hwnd);
-            }
-            Ok(Box::new(Editor::new(config, wake.clone())))
-        }),
-    )
-}
 
 pub struct Reply {
     pub result: mpsc::Sender<Result<(), String>>,
@@ -147,7 +16,7 @@ struct ApplyRequest {
     close: bool,
 }
 
-struct Editor {
+pub struct Editor {
     wake: Wake,
     saved: Config,
     address: String,
@@ -161,7 +30,7 @@ struct Editor {
 }
 
 impl Editor {
-    fn new(saved: Config, wake: Wake) -> Self {
+    pub fn new(saved: Config, wake: Wake) -> Self {
         Self {
             wake,
             saved,
@@ -224,10 +93,8 @@ impl Editor {
             }
         }
     }
-}
 
-impl eframe::App for Editor {
-    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    pub fn logic(&mut self, ctx: &Context, visible: bool) {
         let Some(ApplyRequest {
             receive,
             config,
@@ -248,7 +115,7 @@ impl eframe::App for Editor {
                 self.saved = *config;
                 self.message = "Settings applied.".into();
                 self.failed = false;
-                if *close {
+                if *close && visible {
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
             }
@@ -260,7 +127,7 @@ impl eframe::App for Editor {
         self.pending = None;
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
         let footer =
             egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(16, 10));
         egui::Panel::bottom("settings_actions")

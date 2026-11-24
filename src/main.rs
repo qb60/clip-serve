@@ -7,6 +7,10 @@ mod autostart;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
+mod desktop;
+#[cfg(windows)]
+mod recent;
+#[cfg(windows)]
 mod settings;
 #[cfg(windows)]
 mod tray;

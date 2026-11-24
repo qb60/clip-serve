@@ -18,8 +18,6 @@ pub struct Tray {
     icon: TrayIcon,
     enabled: CheckMenuItem,
     copy: MenuItem,
-    restore: MenuItem,
-    clear: MenuItem,
     autostart: CheckMenuItem,
     status: Option<Status>,
 }
@@ -28,14 +26,11 @@ impl Tray {
     pub fn new(wake: Wake) -> Result<Self, Box<dyn std::error::Error>> {
         let enabled = CheckMenuItem::new("Enable capture", true, false, None);
         let copy = MenuItem::new("Copy latest image URL", false, None);
-        let restore = MenuItem::new("Restore latest image to clipboard", false, None);
-        let clear = MenuItem::new("Clear stored images", false, None);
+        let recent = MenuItem::new("Recent images...", true, None);
         let settings = MenuItem::new("Settings...", true, None);
         let autostart = CheckMenuItem::new("Start with Windows", true, false, None);
         let exit = MenuItem::new("Exit", true, None);
-        let menu = Menu::with_items(&[
-            &enabled, &copy, &restore, &clear, &settings, &autostart, &exit,
-        ])?;
+        let menu = Menu::with_items(&[&enabled, &copy, &recent, &settings, &autostart, &exit])?;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
@@ -46,8 +41,7 @@ impl Tray {
         let items = [
             (enabled.id().clone(), Action::ToggleCapture),
             (copy.id().clone(), Action::Copy),
-            (restore.id().clone(), Action::Restore),
-            (clear.id().clone(), Action::Clear),
+            (recent.id().clone(), Action::RecentImages),
             (settings.id().clone(), Action::Settings),
             (autostart.id().clone(), Action::ToggleAutostart),
             (exit.id().clone(), Action::Exit),
@@ -74,8 +68,6 @@ impl Tray {
             icon,
             enabled,
             copy,
-            restore,
-            clear,
             autostart,
             status: None,
         })
@@ -86,8 +78,6 @@ impl Tray {
         self.enabled.set_checked(status.enabled);
         self.autostart.set_checked(status.autostart);
         self.copy.set_enabled(status.healthy && status.count != 0);
-        self.restore.set_enabled(status.count != 0);
-        self.clear.set_enabled(status.count != 0);
         if self.status == Some(status) && !force {
             return;
         }

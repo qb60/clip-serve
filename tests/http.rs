@@ -9,15 +9,19 @@ use std::{
 use clipserve::{
     capture::encode_png,
     http::Server,
-    store::{SharedStore, Store},
+    store::{SharedStore, Store, StoredImage},
 };
 
 fn insert(store: &SharedStore, bytes: Arc<[u8]>) -> String {
+    let image = StoredImage {
+        png: bytes,
+        thumbnail: Arc::new(image::RgbaImage::new(1, 1)),
+    };
     let mut id = String::new();
     store
         .lock()
         .unwrap()
-        .publish(bytes, |generated| {
+        .publish(image, |generated| {
             id = generated.to_owned();
             Ok::<_, ()>(())
         })
