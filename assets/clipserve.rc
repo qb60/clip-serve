@@ -1,0 +1,25 @@
+1 ICON "clipserve.ico"
+1 24 "clipserve.manifest"
+
+1 VERSIONINFO
+FILEVERSION CLIPSERVE_FILE_VERSION
+PRODUCTVERSION CLIPSERVE_FILE_VERSION
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "ClipServe"
+            VALUE "FileVersion", CLIPSERVE_VERSION
+            VALUE "OriginalFilename", "ClipServe.exe"
+            VALUE "ProductName", "ClipServe"
+            VALUE "ProductVersion", CLIPSERVE_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

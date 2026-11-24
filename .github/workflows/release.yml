@@ -1,0 +1,24 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Check, build, and package the Windows release
+        run: docker build --platform linux/amd64 --progress plain --build-arg "RELEASE_TAG=$GITHUB_REF_NAME" --output type=local,dest=dist .
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/ClipServe.exe dist/ClipServe-windows-x64.zip dist/SHA256SUMS.txt --verify-tag --generate-notes --title "ClipServe $GITHUB_REF_NAME"

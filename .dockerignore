@@ -1,0 +1,7 @@
+.git
+.github
+target
+dist
+SPEC.md
+config.json
+*.exe
