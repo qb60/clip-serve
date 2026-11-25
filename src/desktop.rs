@@ -191,6 +191,77 @@ fn monitor_work_area(frame: &eframe::Frame, pixels_per_point: f32) -> Option<egu
     })
 }
 
+fn apply_windows_style(ctx: &Context) {
+    use egui::{Color32, Stroke};
+
+    if let Some(font) = std::env::var_os("SystemRoot").and_then(|root| {
+        let path = std::path::PathBuf::from(root)
+            .join("Fonts")
+            .join("segoeui.ttf");
+        std::fs::read(path).ok()
+    }) {
+        ctx.add_font(egui::FontInsert::new(
+            "Segoe UI",
+            egui::FontData::from_owned(font),
+            vec![egui::InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: egui::FontPriority::Highest,
+            }],
+        ));
+    }
+
+    ctx.all_styles_mut(|style| {
+        let visuals = &mut style.visuals;
+        visuals.text_options.subpixel_binning = false;
+        let (panel, field, idle, hovered, border, accent, selection) = if visuals.dark_mode {
+            (
+                32,
+                26,
+                45,
+                56,
+                112,
+                Color32::from_rgb(96, 205, 255),
+                Color32::from_rgb(31, 65, 88),
+            )
+        } else {
+            visuals.widgets.noninteractive.fg_stroke.color = Color32::BLACK;
+            visuals.widgets.inactive.fg_stroke.color = Color32::BLACK;
+            (
+                248,
+                255,
+                255,
+                241,
+                156,
+                Color32::from_rgb(0, 95, 184),
+                Color32::from_rgb(223, 236, 248),
+            )
+        };
+        visuals.panel_fill = Color32::from_gray(panel);
+        visuals.window_fill = visuals.panel_fill;
+        visuals.text_edit_bg_color = Some(Color32::from_gray(field));
+        visuals.selection.bg_fill = selection;
+        visuals.selection.stroke = Stroke::new(2.0, accent);
+
+        let widgets = &mut visuals.widgets;
+        for (widget, fill, outline) in [
+            (
+                &mut widgets.inactive,
+                idle,
+                Stroke::new(1.0, Color32::from_gray(border)),
+            ),
+            (&mut widgets.hovered, hovered, Stroke::new(1.0, accent)),
+            (&mut widgets.active, hovered, Stroke::new(2.0, accent)),
+            (&mut widgets.open, hovered, Stroke::new(1.0, accent)),
+        ] {
+            widget.bg_fill = Color32::from_gray(fill);
+            widget.weak_bg_fill = widget.bg_fill;
+            widget.bg_stroke = outline;
+            widget.corner_radius = 4.into();
+            widget.expansion = 0.0;
+        }
+    });
+}
+
 fn run(view: View, wake: &Wake, store: &SharedStore, window: &Mutex<Window>) -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(view.size())
@@ -214,6 +285,7 @@ fn run(view: View, wake: &Wake, store: &SharedStore, window: &Mutex<Window>) -> 
         view.title(),
         options,
         Box::new(|cc| {
+            apply_windows_style(&cc.egui_ctx);
             let handle = cc.window_handle()?;
             let RawWindowHandle::Win32(handle) = handle.as_raw() else {
                 unreachable!("ClipServe uses a Win32 window");

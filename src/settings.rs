@@ -150,10 +150,16 @@ impl Editor {
                         {
                             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                         }
-                        if ui
-                            .add(egui::Button::new("OK").min_size(button_size))
-                            .clicked()
-                        {
+                        let ok = ui
+                            .scope(|ui| {
+                                let visuals = ui.visuals_mut();
+                                visuals.widgets.inactive.weak_bg_fill = visuals.selection.bg_fill;
+                                visuals.widgets.inactive.bg_stroke =
+                                    egui::Stroke::new(1.0, visuals.selection.stroke.color);
+                                ui.add(egui::Button::new("OK").min_size(button_size))
+                            })
+                            .inner;
+                        if ok.clicked() {
                             self.apply(ui.ctx(), true);
                         }
                     });
