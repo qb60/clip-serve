@@ -9,6 +9,8 @@ docker build --platform linux/amd64 --progress plain --output type=local,dest=di
 (cd dist && sha256sum -c SHA256SUMS.txt)
 ```
 
+On Linux, the Docker build embeds GPUI's Direct3D shader source. ClipServe compiles it once on the desktop thread at startup and reuses the bytecode. Native Windows release builds precompile the shaders with the Windows SDK's `fxc.exe`.
+
 For a native Windows build, install stable Rust and Visual Studio Build Tools with **Desktop development with C++** and a Windows SDK.
 
 ```powershell

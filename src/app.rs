@@ -77,6 +77,7 @@ pub enum Command {
     HttpStopped,
 }
 
+#[derive(Clone, Copy)]
 pub enum ImageAction {
     Copy,
     Restore,
@@ -397,8 +398,7 @@ impl App {
             }
             Command::Apply(config, reply) => {
                 let result = self.apply(config);
-                let _ = reply.result.send(result);
-                reply.ctx.request_repaint();
+                let _ = reply.try_send(result);
             }
             Command::Prepared(Prepared::Capture(job, result)) => {
                 if self.state.validate(job, clipboard::sequence()).is_some() {

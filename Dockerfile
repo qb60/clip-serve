@@ -14,6 +14,7 @@ RUN curl --fail --show-error --silent --location --retry 3 https://github.com/tr
     && tar -xJf /tmp/msvc-sdk.tar.xz -C /opt \
     && rm /tmp/msvc-sdk.tar.xz \
     && test -d /opt/windows-msvc-sysroot/include
+RUN apt-get update && apt-get install -y --no-install-recommends patch && rm -rf /var/lib/apt/lists/*
 ENV XWIN_CROSS_COMPILER=clang XWIN_MSVC_SYSROOT=/opt/windows-msvc-sysroot
 
 WORKDIR /work
@@ -22,14 +23,22 @@ COPY .cargo .cargo
 COPY assets assets
 COPY src src
 COPY tests tests
+COPY scripts/gpui-embedded-shaders.patch ./
 
 RUN --mount=type=cache,id=clipserve-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=clipserve-cargo-target,target=/work/target,sharing=locked \
     cargo fmt --check \
     && cargo clippy --locked --all-targets -- -D warnings \
     && cargo test --locked \
-    && cargo xwin clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings \
-    && cargo xwin build --release --locked --target x86_64-pc-windows-msvc \
+    && cargo fetch --locked --target x86_64-pc-windows-msvc \
+    && cp -R /usr/local/cargo/registry/src/*/gpui-pre-windows-0.3.14 /work/gpui-pre-windows \
+    && patch -d /work/gpui-pre-windows -p1 < gpui-embedded-shaders.patch \
+    && cd /work/gpui-pre-windows/src \
+    && sed '/^#include "alpha_correction.hlsl"/d' shaders.hlsl > shaders-body.hlsl \
+    && cat alpha_correction.hlsl shaders-body.hlsl > shaders.hlsl \
+    && cd /work \
+    && CLIPSERVE_EMBEDDED_SHADERS=1 cargo xwin clippy --config 'paths=["/work/gpui-pre-windows"]' --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings \
+    && CLIPSERVE_EMBEDDED_SHADERS=1 cargo xwin build --config 'paths=["/work/gpui-pre-windows"]' --release --locked --target x86_64-pc-windows-msvc \
     && cp target/x86_64-pc-windows-msvc/release/clipserve.exe ClipServe.exe
 
 COPY README.md ./
@@ -42,9 +51,10 @@ RUN cargo metadata --locked --no-deps --format-version 1 > /tmp/metadata.json \
     && mkdir /out \
     && cp ClipServe.exe /out/ClipServe.exe \
     && cp README.md /out/README.md \
+    && cp /work/gpui-pre-windows/LICENSE-APACHE /out/LICENSE-GPUI.txt \
     && cd /out \
-    && zip -q ClipServe-windows-x64.zip ClipServe.exe README.md \
-    && rm README.md \
+    && zip -q ClipServe-windows-x64.zip ClipServe.exe README.md LICENSE-GPUI.txt \
+    && rm README.md LICENSE-GPUI.txt \
     && sha256sum ClipServe.exe ClipServe-windows-x64.zip > SHA256SUMS.txt \
     && wc -c ClipServe.exe
 

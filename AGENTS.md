@@ -7,7 +7,7 @@ ClipServe is a Windows tray app that turns clipboard images into HTTP links.
 - `src/app.rs` coordinates Win32 events, tray actions, clipboard operations, and the HTTP listener.
 - `src/clipboard.rs` reads and writes the Windows clipboard. `src/capture.rs` handles capture state and image processing.
 - `src/store.rs` keeps images and thumbnails in memory. `src/http.rs` serves individual PNGs. Loopback HTTP tests are in `tests/http.rs`.
-- `src/desktop.rs` runs the egui windows. `src/settings.rs` handles settings, `src/recent.rs` handles the gallery and preview, and `src/tray.rs` defines the tray menu.
+- `src/desktop.rs` runs the GPUI windows. `src/settings.rs` handles settings, `src/recent.rs` handles the gallery and preview, and `src/tray.rs` defines the tray menu.
 - `src/config.rs` validates and saves configuration. `src/autostart.rs` manages Windows startup.
 
 ## Constraints

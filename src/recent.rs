@@ -1,386 +1,459 @@
 use std::{
     collections::{HashMap, HashSet},
-    io,
-    sync::{Arc, mpsc},
-    thread,
+    ops::Range,
+    sync::Arc,
 };
 
-use clipserve::{capture::preview_png, store::SharedStore};
-use eframe::egui::{
-    self, ColorImage, Context, TextureHandle, TextureOptions, Ui, ViewportCommand, ViewportId,
+use clipserve::{
+    capture::preview_png,
+    store::{Entry, SharedStore},
+};
+use gpui::{
+    App, AppContext, ClickEvent, Context, IntoElement, PromptButton, PromptLevel, Render,
+    RenderImage, SharedString, UniformListScrollHandle, Window, WindowHandle, div, img, prelude::*,
+    px, size, uniform_list,
+};
+use gpui_component::{
+    ActiveTheme, Disableable, Root, StyledExt,
+    button::Button,
+    scroll::{Scrollbar, ScrollbarMode},
 };
 
 use crate::{
     app::{Command, ImageAction, Wake},
     clipboard,
+    desktop::window_options,
 };
 
-const TILE_WIDTH: f32 = 150.0;
-const TILE_HEIGHT: f32 = 112.0;
+const TILE_WIDTH: f32 = 150.;
+const TILE_GAP: f32 = 8.;
+const GRID_INSET: f32 = 12.;
+pub const GALLERY_WIDTH: f32 = grid_width(4) + 2. * GRID_INSET + TILE_GAP;
 
 pub struct RecentImages {
     store: SharedStore,
     wake: Wake,
+    entries: Vec<Entry>,
+    thumbnails: HashMap<String, Arc<RenderImage>>,
+    scroll: UniformListScrollHandle,
     selected: Option<String>,
-    textures: HashMap<String, TextureHandle>,
-    preview: Preview,
-    confirm_clear: bool,
+    preview: Option<(String, WindowHandle<Root>)>,
+    confirming: bool,
+    can_copy: bool,
 }
 
 impl RecentImages {
-    pub fn new(store: SharedStore, wake: Wake) -> Self {
+    pub fn new(store: SharedStore, wake: Wake, can_copy: bool, cx: &mut Context<Self>) -> Self {
+        let entries = store.lock().unwrap().recent().cloned().collect();
+        cx.on_release(|gallery, cx| gallery.close_preview(cx))
+            .detach();
         Self {
             store,
             wake,
+            entries,
+            thumbnails: HashMap::new(),
+            scroll: UniformListScrollHandle::new(),
             selected: None,
-            textures: HashMap::new(),
-            preview: Preview::default(),
-            confirm_clear: false,
+            preview: None,
+            confirming: false,
+            can_copy,
         }
     }
 
-    pub fn hide_dialogs(&mut self) {
-        self.preview.close();
-        self.confirm_clear = false;
-    }
-
-    pub fn ui(&mut self, ui: &mut Ui, can_copy: bool, work_area: Option<egui::Rect>) {
-        let entries: Vec<_> = self
-            .store
-            .lock()
-            .unwrap()
-            .recent()
-            .map(|entry| (entry.id.clone(), Arc::clone(&entry.image.thumbnail)))
-            .collect();
-        let ids: HashSet<_> = entries.iter().map(|(id, _)| id.as_str()).collect();
-        self.textures.retain(|id, _| ids.contains(id.as_str()));
+    pub fn refresh(&mut self, can_copy: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let copy_changed = std::mem::replace(&mut self.can_copy, can_copy) != can_copy;
+        self.entries = self.store.lock().unwrap().recent().cloned().collect();
+        let ids: HashSet<_> = self.entries.iter().map(|entry| entry.id.as_str()).collect();
+        self.thumbnails.retain(|id, image| {
+            if ids.contains(id.as_str()) {
+                true
+            } else {
+                let _ = window.drop_image(Arc::clone(image));
+                false
+            }
+        });
         if self.selected.as_deref().is_some_and(|id| !ids.contains(id)) {
             self.selected = None;
         }
         if self
             .preview
-            .id
-            .as_deref()
-            .is_some_and(|id| !ids.contains(id))
+            .as_ref()
+            .is_some_and(|(id, _)| !ids.contains(id.as_str()))
         {
-            self.preview.close();
-        }
-
-        let footer =
-            egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(16, 10));
-        egui::Panel::bottom("recent_actions")
-            .resizable(false)
-            .exact_size(52.0)
-            .frame(footer)
-            .show(ui, |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    image_buttons(ui, &self.wake, self.selected.as_deref(), can_copy);
-                    let preview = ui.add_enabled(
-                        self.selected.is_some(),
-                        egui::Button::new("Preview").min_size(egui::vec2(80.0, 30.0)),
-                    );
-                    if preview.clicked()
-                        && let Some(id) = &self.selected
-                    {
-                        self.preview.open(id, ui.ctx());
-                    }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(
-                                !entries.is_empty(),
-                                egui::Button::new("Clear stored images")
-                                    .min_size(egui::vec2(132.0, 30.0)),
-                            )
-                            .clicked()
-                        {
-                            self.confirm_clear = true;
-                            ui.ctx().request_repaint();
-                        }
+            self.close_preview(cx);
+        } else if copy_changed && let Some((_, handle)) = &self.preview {
+            let _ = handle.update(cx, |root, _, cx| {
+                if let Ok(preview) = root.view().clone().downcast::<Preview>() {
+                    preview.update(cx, |preview, cx| {
+                        preview.can_copy = can_copy;
+                        cx.notify();
                     });
-                });
+                }
             });
+        }
+        cx.notify();
+    }
 
-        let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(14));
-        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-            if entries.is_empty() {
-                ui.centered_and_justified(|ui| ui.label("No images captured yet."));
-                return;
-            }
-            let spacing = ui.spacing().item_spacing.x;
-            let scrollbar = ui.spacing().scroll.allocated_width();
-            let columns = ((ui.available_width() - scrollbar + spacing) / (TILE_WIDTH + spacing))
-                .floor()
-                .max(1.0) as usize;
-            let caption = egui::TextStyle::Monospace.resolve(ui.style());
-            let row_height = TILE_HEIGHT + ui.text_style_height(&egui::TextStyle::Monospace) + 8.0;
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show_rows(
-                    ui,
-                    row_height,
-                    entries.len().div_ceil(columns),
-                    |ui, rows| {
+    fn open_preview(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((open, handle)) = &self.preview
+            && open == &id
+            && handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            return;
+        }
+        let Some(png) = self.store.lock().unwrap().get(&id) else {
+            return;
+        };
+        self.close_preview(cx);
+        let display = window.display(cx);
+        let ideal = size(px(960.), px(720.));
+        let preview_size = display.as_ref().map_or(ideal, |display| {
+            let screen = display.bounds().size;
+            size(
+                ideal.width.min(screen.width * 0.85),
+                ideal.height.min(screen.height * 0.85),
+            )
+        });
+        let options = window_options(
+            format!("ClipServe Preview — {id}.png"),
+            preview_size,
+            Some(size(px(320.), px(240.))),
+            display.map(|display| display.id()),
+            cx,
+        );
+        let wake = self.wake.clone();
+        let store = Arc::clone(&self.store);
+        let can_copy = self.can_copy;
+        let result = cx.open_window(options, |window, cx| {
+            let preview = cx.new(|cx| {
+                let decode = cx
+                    .background_executor()
+                    .spawn(async move { preview_png(&png).map(render_image) });
+                cx.spawn(async move |preview, cx| {
+                    let result = decode.await;
+                    let _ = preview.update(cx, |this: &mut Preview, cx| {
+                        this.image = Some(
+                            result.map_err(|err| format!("Could not preview the image.\n{err}")),
+                        );
+                        cx.notify();
+                    });
+                })
+                .detach();
+                Preview {
+                    image: None,
+                    id: id.clone(),
+                    wake,
+                    store,
+                    can_copy,
+                }
+            });
+            cx.new(|cx| Root::new(preview, window, cx))
+        });
+        match result {
+            Ok(handle) => self.preview = Some((id, handle)),
+            Err(err) => self.wake.send(Command::Error(format!(
+                "Could not open the image preview.\n\n{err}"
+            ))),
+        }
+    }
+
+    fn close_preview(&mut self, cx: &mut App) {
+        if let Some((_, handle)) = self.preview.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+
+    fn confirm_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirming || self.entries.is_empty() {
+            return;
+        }
+        self.confirming = true;
+        let reply = window.prompt(
+            PromptLevel::Warning,
+            "Clear stored images?",
+            Some("All existing image URLs will stop working."),
+            &[
+                PromptButton::cancel("Cancel"),
+                PromptButton::ok("Clear images"),
+            ],
+            cx,
+        );
+        cx.spawn(async move |gallery, cx| {
+            let confirmed = matches!(reply.await, Ok(1));
+            let _ = gallery.update(cx, |this, cx| {
+                this.confirming = false;
+                if confirmed {
+                    this.wake.send(Command::ClearImages);
+                    this.selected = None;
+                    this.close_preview(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+impl Render for RecentImages {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let border = cx.theme().border;
+        let columns = gallery_columns(f32::from(window.viewport_size().width));
+        let selected = self.selected.as_deref();
+        let no_images = self.entries.is_empty();
+        div()
+            .v_flex()
+            .size_full()
+            .child(if no_images {
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child("No images captured yet.")
+                    .into_any_element()
+            } else {
+                let tiles = uniform_list(
+                    "images",
+                    self.entries.len().div_ceil(columns),
+                    cx.processor(move |this, rows: Range<usize>, _, cx| {
+                        let background = cx.theme().background;
+                        let selected_color = cx.theme().accent;
+                        let mut rendered = Vec::with_capacity(rows.len());
                         for row in rows {
                             let start = row * columns;
-                            let end = (start + columns).min(entries.len());
-                            let count = (end - start) as f32;
-                            let (_, row_rect) = ui.allocate_space(egui::vec2(
-                                count * TILE_WIDTH + (count - 1.0) * spacing,
-                                row_height,
-                            ));
-                            for (col, (id, thumbnail)) in entries[start..end].iter().enumerate() {
-                                let rect = egui::Rect::from_min_size(
-                                    row_rect.min
-                                        + egui::vec2(col as f32 * (TILE_WIDTH + spacing), 0.0),
-                                    egui::vec2(TILE_WIDTH, row_height),
-                                );
+                            let end = (start + columns).min(this.entries.len());
+                            let mut tiles = div()
+                                .h_flex()
+                                .flex_none()
+                                .w(px(grid_width(columns)))
+                                .gap(px(TILE_GAP))
+                                .pb(px(TILE_GAP));
+                            for entry in &this.entries[start..end] {
+                                let id = entry.id.clone();
                                 let texture =
-                                    self.textures.entry(id.clone()).or_insert_with(|| {
-                                        let size = [
-                                            thumbnail.width() as usize,
-                                            thumbnail.height() as usize,
-                                        ];
-                                        let image = ColorImage::from_rgba_unmultiplied(
-                                            size,
-                                            thumbnail.as_raw(),
-                                        );
-                                        ui.ctx().load_texture(id, image, TextureOptions::LINEAR)
+                                    this.thumbnails.entry(id.clone()).or_insert_with(|| {
+                                        render_image(entry.image.thumbnail.as_ref().clone())
                                     });
-                                let selected = self.selected.as_ref() == Some(id);
-                                let tile = image_tile(ui, rect, id, texture, selected, &caption);
-                                if tile.clicked() || tile.double_clicked() {
-                                    self.selected = Some(id.clone());
-                                    if tile.double_clicked() {
-                                        self.preview.open(id, ui.ctx());
-                                    }
-                                    ui.ctx().request_repaint();
-                                }
+                                let is_selected = this.selected.as_ref() == Some(&id);
+                                tiles = tiles.child(
+                                    div()
+                                        .id(SharedString::from(id.clone()))
+                                        .role(gpui::Role::Button)
+                                        .tab_stop(true)
+                                        .v_flex()
+                                        .items_center()
+                                        .w(px(TILE_WIDTH))
+                                        .flex_none()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(if is_selected {
+                                            cx.theme().ring
+                                        } else {
+                                            border
+                                        })
+                                        .bg(if is_selected {
+                                            selected_color
+                                        } else {
+                                            background
+                                        })
+                                        .hover(|style| style.bg(selected_color))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(
+                                            move |this, event: &ClickEvent, window, cx| {
+                                                this.selected = Some(id.clone());
+                                                if event.click_count() >= 2 {
+                                                    this.open_preview(id.clone(), window, cx);
+                                                }
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .child(img(Arc::clone(texture)).w_full().h(px(112.)))
+                                        .child(div().pb_1().child(format!("{}.png", entry.id))),
+                                );
                             }
+                            rendered.push(div().h_flex().w_full().justify_center().child(tiles));
                         }
-                    },
-                );
-        });
-
-        if self.confirm_clear {
-            let modal =
-                egui::Modal::new(egui::Id::unique("clipserve_clear_images")).show(ui.ctx(), |ui| {
-                    ui.set_max_width(300.0);
-                    ui.heading("Clear stored images?");
-                    ui.label("All existing image URLs will stop working.");
-                    ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        (
-                            ui.button("Clear images").clicked(),
-                            ui.button("Cancel").clicked(),
-                        )
-                    })
-                    .inner
-                });
-            let (clear, cancel) = modal.inner;
-            if clear {
-                self.wake.send(Command::ClearImages);
-                self.selected = None;
-                self.preview.close();
-            }
-            if clear || cancel || modal.should_close() {
-                self.confirm_clear = false;
-            }
-        }
-
-        self.preview
-            .show(ui.ctx(), &self.store, &self.wake, can_copy, work_area);
-    }
-}
-
-fn image_tile(
-    ui: &Ui,
-    rect: egui::Rect,
-    id: &str,
-    texture: &TextureHandle,
-    selected: bool,
-    caption: &egui::FontId,
-) -> egui::Response {
-    let tile = ui.interact(rect, ui.scope_id().with(id), egui::Sense::click());
-    let filename = format!("{id}.png");
-    tile.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, tile.enabled(), selected, &filename)
-    });
-    let visuals = ui.style().interact_selectable(&tile, selected);
-    let painter = ui.painter();
-    painter.rect(
-        rect,
-        visuals.corner_radius,
-        visuals.weak_bg_fill,
-        visuals.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
-    let image_center = egui::pos2(rect.center().x, rect.min.y + TILE_HEIGHT * 0.5);
-    painter.image(
-        texture.id(),
-        egui::Rect::from_center_size(image_center, texture.size_vec2()),
-        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-        egui::Color32::WHITE,
-    );
-    painter.text(
-        egui::pos2(rect.center().x, rect.min.y + TILE_HEIGHT + 4.0),
-        egui::Align2::CENTER_TOP,
-        filename,
-        caption.clone(),
-        visuals.text_color(),
-    );
-    tile
-}
-
-fn image_buttons(ui: &mut Ui, wake: &Wake, id: Option<&str>, can_copy: bool) {
-    let size = egui::vec2(104.0, 30.0);
-    let restore = ui.add_enabled(
-        id.is_some(),
-        egui::Button::new("Restore image").min_size(size),
-    );
-    let copy = ui.add_enabled(
-        id.is_some() && can_copy,
-        egui::Button::new("Copy URL").min_size(size),
-    );
-    if let Some(id) = id {
-        let action = if copy.clicked() {
-            Some(ImageAction::Copy)
-        } else {
-            restore.clicked().then_some(ImageAction::Restore)
-        };
-        if let Some(action) = action {
-            wake.send(Command::Image(action, id.to_owned(), clipboard::sequence()));
-        }
-    }
-}
-
-#[derive(Default)]
-struct Preview {
-    id: Option<String>,
-    image: Option<Result<TextureHandle, String>>,
-    pending: Option<(String, mpsc::Receiver<io::Result<image::RgbaImage>>)>,
-}
-
-impl Preview {
-    fn viewport() -> ViewportId {
-        ViewportId::from_hash_of("clipserve_image_preview")
-    }
-
-    fn open(&mut self, id: &str, ctx: &Context) {
-        if self.id.is_some() {
-            ctx.send_viewport_cmd_to(Self::viewport(), ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd_to(Self::viewport(), ViewportCommand::Focus);
-        }
-        if self.id.as_deref() != Some(id) {
-            self.id = Some(id.to_owned());
-            self.image = None;
-        }
-    }
-
-    fn close(&mut self) {
-        self.id = None;
-        self.image = None;
-    }
-
-    fn load(&mut self, ctx: &Context, store: &SharedStore) {
-        if let Some((id, receive)) = &self.pending {
-            let result = match receive.try_recv() {
-                Ok(result) => result,
-                Err(mpsc::TryRecvError::Empty) => return,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Err(io::Error::other("The preview worker stopped."))
-                }
-            };
-            if self.id.as_ref() == Some(id) {
-                self.image = Some(
-                    result
-                        .map(|pixels| {
-                            let size = [pixels.width() as usize, pixels.height() as usize];
-                            let image = ColorImage::from_rgba_unmultiplied(size, pixels.as_raw());
-                            ctx.load_texture("image_preview", image, TextureOptions::LINEAR)
-                        })
-                        .map_err(|err| format!("Could not preview the image.\n{err}")),
-                );
-            }
-            self.pending = None;
-        }
-        if let Some(id) = &self.id
-            && self.image.is_none()
-        {
-            let Some(png) = store.lock().unwrap().get(id) else {
-                self.close();
-                return;
-            };
-            let (reply, receive) = mpsc::channel();
-            let repaint = ctx.clone();
-            match thread::Builder::new()
-                .name("Image preview".into())
-                .spawn(move || {
-                    let _ = reply.send(preview_png(&png));
-                    repaint.request_repaint_of(ViewportId::ROOT);
-                }) {
-                Ok(_) => self.pending = Some((id.clone(), receive)),
-                Err(err) => {
-                    self.image = Some(Err(format!("Could not start the image preview.\n{err}")))
-                }
-            }
-        }
-    }
-
-    fn show(
-        &mut self,
-        ctx: &Context,
-        store: &SharedStore,
-        wake: &Wake,
-        can_copy: bool,
-        work_area: Option<egui::Rect>,
-    ) {
-        self.load(ctx, store);
-        let Some(id) = &self.id else { return };
-        let ideal = egui::vec2(960.0, 720.0);
-        let area = work_area.or_else(|| {
-            ctx.input(|input| input.viewport().monitor_size)
-                .map(|size| egui::Rect::from_min_size(egui::Pos2::ZERO, size))
-        });
-        let size = area.map_or(ideal, |area| ideal.min(area.size() * 0.85));
-        let mut viewport = egui::ViewportBuilder::default()
-            .with_title(format!("ClipServe Preview — {id}.png"))
-            .with_inner_size(size)
-            .with_min_inner_size([320.0, 240.0]);
-        if let Some(area) = area {
-            viewport = viewport.with_position(area.center() - size * 0.5);
-        }
-        let close = ctx.show_viewport_immediate(Self::viewport(), viewport, |ui, _| {
-            egui::Panel::bottom("preview_actions")
-                .resizable(false)
-                .exact_size(52.0)
-                .show(ui, |ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        image_buttons(ui, wake, Some(id), can_copy);
-                    });
-                });
-            egui::CentralPanel::default().show(ui, |ui| {
-                ui.centered_and_justified(|ui| match &self.image {
-                    Some(Ok(texture)) => {
-                        ui.add(
-                            egui::Image::new((texture.id(), texture.size_vec2()))
-                                .fit_to_exact_size(ui.available_size()),
-                        );
-                    }
-                    Some(Err(message)) => {
-                        ui.label(message);
-                    }
-                    None => {
-                        ui.spinner();
-                    }
-                });
-            });
-            ui.input(|input| {
-                input.viewport().close_requested() || input.key_pressed(egui::Key::Escape)
+                        rendered
+                    }),
+                )
+                .track_scroll(&self.scroll)
+                .size_full()
+                .px(px(GRID_INSET))
+                .pt_3();
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(tiles)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(GRID_INSET))
+                            .child(
+                                Scrollbar::vertical(&self.scroll)
+                                    .mode(ScrollbarMode::Always)
+                                    .viewport_from_layout()
+                                    .styles(|styles| {
+                                        styles.track(|track| track.width(px(GRID_INSET)))
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
             })
-        });
-        if close {
-            self.close();
-            ctx.request_repaint();
-        }
+            .child(
+                div()
+                    .h_flex()
+                    .flex_none()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(border)
+                    .px_3()
+                    .py_2()
+                    .child(
+                        Button::new("clear")
+                            .label("Clear stored images")
+                            .outline()
+                            .disabled(no_images || self.confirming)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.confirm_clear(window, cx)),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("preview")
+                            .label("Preview")
+                            .outline()
+                            .disabled(selected.is_none())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if let Some(id) = this.selected.clone() {
+                                    this.open_preview(id, window, cx);
+                                }
+                            })),
+                    )
+                    .children(image_buttons(&self.wake, selected, self.can_copy)),
+            )
+    }
+}
+
+fn gallery_columns(width: f32) -> usize {
+    ((width - 2. * GRID_INSET + TILE_GAP) / (TILE_WIDTH + TILE_GAP))
+        .floor()
+        .max(1.) as usize
+}
+
+const fn grid_width(columns: usize) -> f32 {
+    columns as f32 * (TILE_WIDTH + TILE_GAP) - TILE_GAP
+}
+
+fn image_buttons(wake: &Wake, id: Option<&str>, can_copy: bool) -> [Button; 2] {
+    [
+        ("copy", "Copy URL", ImageAction::Copy, can_copy),
+        ("restore", "Restore image", ImageAction::Restore, true),
+    ]
+    .map(|(key, label, action, enabled)| {
+        let wake = wake.clone();
+        let id = id.map(str::to_owned);
+        Button::new(key)
+            .label(label)
+            .outline()
+            .disabled(!enabled || id.is_none())
+            .on_click(move |_, _, _| {
+                if let Some(id) = &id {
+                    wake.send(Command::Image(action, id.clone(), clipboard::sequence()));
+                }
+            })
+    })
+}
+
+fn render_image(mut pixels: image::RgbaImage) -> Arc<RenderImage> {
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new([image::Frame::new(pixels)]))
+}
+
+struct Preview {
+    image: Option<Result<Arc<RenderImage>, String>>,
+    id: String,
+    wake: Wake,
+    store: SharedStore,
+    can_copy: bool,
+}
+
+impl Render for Preview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let stored = self.store.lock().unwrap().get(&self.id).is_some();
+        let content = match &self.image {
+            Some(Ok(image)) => img(Arc::clone(image)).size_full().into_any_element(),
+            Some(Err(error)) => div().child(error.clone()).into_any_element(),
+            None => div().child("Loading image…").into_any_element(),
+        };
+        div()
+            .v_flex()
+            .size_full()
+            .id("preview-window")
+            .on_key_down(|event, window, cx| {
+                if event.keystroke.key == "escape" {
+                    window.remove_window();
+                    cx.stop_propagation();
+                }
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_3()
+                    .child(content),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .flex_none()
+                    .justify_end()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .px_3()
+                    .py_2()
+                    .children(image_buttons(
+                        &self.wake,
+                        stored.then_some(self.id.as_str()),
+                        self.can_copy,
+                    )),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gallery_columns_fit_the_viewport() {
+        assert_eq!(gallery_columns(300.), 1);
+        assert_eq!(gallery_columns(480.), 2);
+        assert_eq!(gallery_columns(GALLERY_WIDTH), 4);
+        let four_column_minimum = grid_width(4) + 2. * GRID_INSET;
+        assert_eq!(gallery_columns(four_column_minimum), 4);
+        assert_eq!(gallery_columns(four_column_minimum - 1.), 3);
+    }
+
+    #[test]
+    fn render_image_preserves_alpha_and_converts_to_bgra() {
+        let image = render_image(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([1, 2, 3, 4]),
+        ));
+        assert_eq!(image.as_bytes(0), Some([3, 2, 1, 4].as_slice()));
     }
 }

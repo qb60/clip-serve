@@ -1,0 +1,198 @@
+--- a/src/directx_renderer.rs
++++ b/src/directx_renderer.rs
+@@ -1722,13 +1722,12 @@
+ pub(crate) mod shader_resources {
+     use anyhow::Result;
+
+-    #[cfg(debug_assertions)]
+     use windows::{
+         Win32::Graphics::Direct3D::{
+-            Fxc::{D3DCOMPILE_DEBUG, D3DCOMPILE_SKIP_OPTIMIZATION, D3DCompileFromFile},
++            Fxc::{D3DCOMPILE_OPTIMIZATION_LEVEL3, D3DCompile},
+             ID3DBlob,
+         },
+-        core::{HSTRING, PCSTR},
++        core::PCSTR,
+     };
+
+     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+@@ -1749,83 +1748,50 @@
+         Fragment,
+     }
+
+-    pub(crate) struct RawShaderBytes<'t> {
+-        inner: &'t [u8],
+-
+-        #[cfg(debug_assertions)]
+-        _blob: ID3DBlob,
+-    }
+-
+-    impl<'t> RawShaderBytes<'t> {
++    impl ShaderModule {
++        const ALL: [Self; 8] = [
++            Self::Quad, Self::OpaqueQuad, Self::Shadow, Self::Underline,
++            Self::PathTile, Self::MonochromeSprite, Self::SubpixelSprite, Self::PolychromeSprite,
++        ];
++    }
++
++    type ShaderBytes = Result<Box<[u8]>, String>;
++    static SHADER_BYTES: [std::sync::OnceLock<ShaderBytes>; ShaderModule::ALL.len() * 2] =
++        [const { std::sync::OnceLock::new() }; ShaderModule::ALL.len() * 2];
++
++    /// Compile and cache the embedded shaders before creating any windows.
++    pub fn warm_up_shaders() -> Result<()> {
++        for module in ShaderModule::ALL {
++            for target in [ShaderTarget::Vertex, ShaderTarget::Fragment] {
++                RawShaderBytes::new(module, target)?;
++            }
++        }
++        Ok(())
++    }
++
++    pub(crate) struct RawShaderBytes(&'static [u8]);
++
++    impl RawShaderBytes {
+         pub(crate) fn new(module: ShaderModule, target: ShaderTarget) -> Result<Self> {
+-            #[cfg(not(debug_assertions))]
+-            {
+-                Ok(Self::from_bytes(module, target))
+-            }
+-            #[cfg(debug_assertions)]
+-            {
+-                let blob = build_shader_blob(module, target)?;
+-                let inner = unsafe {
+-                    std::slice::from_raw_parts(
+-                        blob.GetBufferPointer() as *const u8,
+-                        blob.GetBufferSize(),
+-                    )
++            let index = module as usize * 2 + target as usize;
++            let bytes = SHADER_BYTES[index].get_or_init(|| {
++                let blob = build_shader_blob(module, target).map_err(|err| format!("{err:#}"))?;
++                // The blob owns the compiled bytes until we copy them into the cache.
++                let bytes = unsafe {
++                    std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize())
+                 };
+-                Ok(Self { inner, _blob: blob })
+-            }
+-        }
+-
+-        pub(crate) fn as_bytes(&'t self) -> &'t [u8] {
+-            self.inner
+-        }
+-
+-        #[cfg(not(debug_assertions))]
+-        fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
+-            let bytes = match module {
+-                ShaderModule::Quad => match target {
+-                    ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
+-                    ShaderTarget::Fragment => QUAD_FRAGMENT_BYTES,
+-                },
+-                ShaderModule::OpaqueQuad => match target {
+-                    ShaderTarget::Vertex => OPAQUE_QUAD_VERTEX_BYTES,
+-                    ShaderTarget::Fragment => OPAQUE_QUAD_FRAGMENT_BYTES,
+-                },
+-                ShaderModule::Shadow => match target {
+-                    ShaderTarget::Vertex => SHADOW_VERTEX_BYTES,
+-                    ShaderTarget::Fragment => SHADOW_FRAGMENT_BYTES,
+-                },
+-                ShaderModule::Underline => match target {
+-                    ShaderTarget::Vertex => UNDERLINE_VERTEX_BYTES,
+-                    ShaderTarget::Fragment => UNDERLINE_FRAGMENT_BYTES,
+-                },
+-                ShaderModule::PathTile => match target {
+-                    ShaderTarget::Vertex => PATH_TILE_VERTEX_BYTES,
+-                    ShaderTarget::Fragment => PATH_TILE_FRAGMENT_BYTES,
+-                },
+-                ShaderModule::MonochromeSprite => match target {
+-                    ShaderTarget::Vertex => MONOCHROME_SPRITE_VERTEX_BYTES,
+-                    ShaderTarget::Fragment => MONOCHROME_SPRITE_FRAGMENT_BYTES,
+-                },
+-                ShaderModule::SubpixelSprite => match target {
+-                    ShaderTarget::Vertex => SUBPIXEL_SPRITE_VERTEX_BYTES,
+-                    ShaderTarget::Fragment => SUBPIXEL_SPRITE_FRAGMENT_BYTES,
+-                },
+-                ShaderModule::PolychromeSprite => match target {
+-                    ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
+-                    ShaderTarget::Fragment => POLYCHROME_SPRITE_FRAGMENT_BYTES,
+-                },
+-            };
+-            Self { inner: bytes }
+-        }
+-    }
+-
+-    #[cfg(debug_assertions)]
++                Ok(bytes.into())
++            });
++            bytes.as_ref().map(|bytes| Self(bytes)).map_err(|err| anyhow::anyhow!("{err}"))
++        }
++
++        pub(crate) fn as_bytes(&self) -> &[u8] {
++            self.0
++        }
++    }
++
+     pub(super) fn build_shader_blob(entry: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
+         unsafe {
+-            use windows::Win32::Graphics::{
+-                Direct3D::ID3DInclude, Hlsl::D3D_COMPILE_STANDARD_FILE_INCLUDE,
+-            };
+-
+             let entry = format!(
+                 "{}_{}\0",
+                 entry.as_str(),
+@@ -1841,25 +1807,16 @@
+
+             let mut compile_blob = None;
+             let mut error_blob = None;
+-            let shader_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+-                .join("src/shaders.hlsl")
+-                .canonicalize()?;
+-
+-            let entry_point = PCSTR::from_raw(entry.as_ptr());
+-            let target_cstr = PCSTR::from_raw(target.as_ptr());
+-
+-            // really dirty trick because winapi bindings are unhappy otherwise
+-            let include_handler = &std::mem::transmute::<usize, ID3DInclude>(
+-                D3D_COMPILE_STANDARD_FILE_INCLUDE as usize,
+-            );
+-
+-            let ret = D3DCompileFromFile(
+-                &HSTRING::from(shader_path.to_str().unwrap()),
++            let source = include_bytes!("shaders.hlsl");
++            let ret = D3DCompile(
++                source.as_ptr().cast(),
++                source.len(),
++                PCSTR::null(),
+                 None,
+-                include_handler,
+-                entry_point,
+-                target_cstr,
+-                D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
++                None::<&windows::Win32::Graphics::Direct3D::ID3DInclude>,
++                PCSTR::from_raw(entry.as_ptr()),
++                PCSTR::from_raw(target.as_ptr()),
++                D3DCOMPILE_OPTIMIZATION_LEVEL3,
+                 0,
+                 &mut compile_blob,
+                 Some(&mut error_blob),
+@@ -1879,10 +1836,6 @@
+         }
+     }
+
+-    #[cfg(not(debug_assertions))]
+-    include!(concat!(env!("OUT_DIR"), "/shaders_bytes.rs"));
+-
+-    #[cfg(debug_assertions)]
+     impl ShaderModule {
+         pub fn as_str(self) -> &'static str {
+             match self {
+--- a/src/gpui_windows.rs
++++ b/src/gpui_windows.rs
+@@ -38,6 +38,7 @@
+ pub(crate) use window::*;
+ pub(crate) use wrapper::*;
+
++pub use directx_renderer::shader_resources::warm_up_shaders;
+ pub use platform::WindowsPlatform;
+
+ pub(crate) use windows::Win32::Foundation::HWND;
