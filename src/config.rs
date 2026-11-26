@@ -17,7 +17,7 @@ pub struct Config {
     pub port: u16,
     pub max_images: usize,
     pub capture_on_startup: bool,
-    pub start_with_windows: bool,
+    pub autostart: bool,
 }
 
 impl Default for Config {
@@ -27,7 +27,7 @@ impl Default for Config {
             port: 8888,
             max_images: 10,
             capture_on_startup: false,
-            start_with_windows: false,
+            autostart: false,
         }
     }
 }
@@ -92,22 +92,24 @@ mod tests {
     #[test]
     fn defaults_and_round_trip_with_atomic_replacement() {
         let dir = tempfile::tempdir().unwrap();
-        let path = config_path(&dir.path().join("ClipServe.exe"));
+        let path = config_path(&dir.path().join("clipserve"));
         let defaults = Config::load(&path).unwrap();
         assert_eq!(defaults.endpoint().to_string(), "127.0.0.1:8888");
         assert_eq!(defaults.max_images, 10);
-        assert!(!defaults.capture_on_startup && !defaults.start_with_windows);
+        assert!(!defaults.capture_on_startup && !defaults.autostart);
         let changed = Config {
             listen_address: "192.168.56.1".parse().unwrap(),
             port: 65535,
             max_images: MAX_IMAGES,
             capture_on_startup: true,
-            start_with_windows: true,
+            autostart: true,
         };
         let pending = changed.stage(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), defaults);
         pending.persist(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), changed);
+        let saved: serde_json::Value = serde_json::from_reader(File::open(path).unwrap()).unwrap();
+        assert_eq!(saved["autostart"], true);
     }
 
     #[test]
@@ -117,8 +119,8 @@ mod tests {
         for json in [
             "{}",
             "{not JSON}",
-            r#"{"listen_address":"0.0.0.0","port":8888,"max_images":10,"capture_on_startup":false,"start_with_windows":false}"#,
-            r#"{"listen_address":"127.0.0.1","port":65536,"max_images":10,"capture_on_startup":false,"start_with_windows":false}"#,
+            r#"{"listen_address":"0.0.0.0","port":8888,"max_images":10,"capture_on_startup":false,"autostart":false}"#,
+            r#"{"listen_address":"127.0.0.1","port":65536,"max_images":10,"capture_on_startup":false,"autostart":false}"#,
         ] {
             fs::write(&path, json).unwrap();
             assert!(Config::load(&path).is_err());

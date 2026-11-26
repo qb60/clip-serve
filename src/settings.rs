@@ -7,16 +7,17 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
 };
 
-use crate::app::{Command, Wake};
-
-pub type Reply = async_channel::Sender<Result<(), String>>;
+use crate::{
+    app::Command,
+    platform::{AUTOSTART_LABEL, Wake},
+};
 
 pub struct Editor {
     wake: Wake,
     saved: Config,
     fields: [Entity<InputState>; 3],
     capture_on_startup: bool,
-    start_with_windows: bool,
+    autostart: bool,
     pending: bool,
     message: String,
     failed: bool,
@@ -43,7 +44,7 @@ impl Editor {
             saved,
             fields,
             capture_on_startup: saved.capture_on_startup,
-            start_with_windows: saved.start_with_windows,
+            autostart: saved.autostart,
             pending: false,
             message: String::new(),
             failed: false,
@@ -68,7 +69,7 @@ impl Editor {
                 .parse()
                 .map_err(|_| "Maximum images must be between 1 and 1000.")?,
             capture_on_startup: self.capture_on_startup,
-            start_with_windows: self.start_with_windows,
+            autostart: self.autostart,
         }
         .validate()
         .map_err(|err| err.to_string())
@@ -197,11 +198,11 @@ impl Render for Editor {
                             )
                             .child(
                                 Checkbox::new("autostart")
-                                    .label("Start with Windows")
-                                    .checked(self.start_with_windows)
+                                    .label(AUTOSTART_LABEL)
+                                    .checked(self.autostart)
                                     .disabled(self.pending)
                                     .on_change(cx.listener(|this, value: &bool, _, cx| {
-                                        this.start_with_windows = *value;
+                                        this.autostart = *value;
                                         cx.notify();
                                     })),
                             )

@@ -1,19 +1,19 @@
 use std::{
     io,
-    rc::Rc,
     sync::Arc,
     thread::{self, JoinHandle},
 };
 
 use clipserve::{config::Config, store::SharedStore};
 use gpui::{
-    App, AppContext, Application, Bounds, DisplayId, Pixels, QuitMode, Size, TitlebarOptions,
-    WindowBounds, WindowHandle, WindowOptions, px, size,
+    App, AppContext, Bounds, DisplayId, Pixels, QuitMode, Size, TitlebarOptions, WindowBounds,
+    WindowHandle, WindowOptions, px, size,
 };
 use gpui_component::Root;
 
 use crate::{
-    app::{Command, Wake},
+    app::Command,
+    platform::{self, Wake},
     recent::{GALLERY_WIDTH, RecentImages},
     settings::Editor,
 };
@@ -41,10 +41,7 @@ impl Desktop {
         let thread = thread::Builder::new()
             .name("Desktop".into())
             .spawn(move || {
-                #[cfg(clipserve_embedded_shaders)]
-                if let Err(err) = gpui_windows::warm_up_shaders() {
-                    log::warn!("Could not precompile the Direct3D shaders: {err:#}");
-                }
+                platform::warm_up_desktop();
                 let mut can_copy = false;
                 let first = loop {
                     match receive.recv_blocking() {
@@ -53,8 +50,8 @@ impl Desktop {
                         Ok(Request::Quit) | Err(_) => return,
                     }
                 };
-                let platform = match gpui_windows::WindowsPlatform::new(false) {
-                    Ok(platform) => platform,
+                let application = match platform::desktop_application() {
+                    Ok(application) => application,
                     Err(err) => {
                         wake.send(Command::Error(format!(
                             "Could not initialize the desktop interface.\n\n{err:#}"
@@ -62,12 +59,12 @@ impl Desktop {
                         return;
                     }
                 };
-                Application::with_platform(Rc::new(platform))
+                application
                     .with_assets(gpui_kit_assets::Assets)
                     .with_quit_mode(QuitMode::Explicit)
                     .run(move |cx| {
                         gpui_component::init(cx);
-                        let mut windows = Windows {
+                        let mut windows = DesktopWindows {
                             settings: None,
                             recent: None,
                             can_copy,
@@ -117,7 +114,7 @@ impl Drop for Desktop {
     }
 }
 
-struct Windows {
+struct DesktopWindows {
     settings: Option<WindowHandle<Root>>,
     recent: Option<WindowHandle<Root>>,
     can_copy: bool,
@@ -125,7 +122,7 @@ struct Windows {
     wake: Wake,
 }
 
-impl Windows {
+impl DesktopWindows {
     fn open(&mut self, view: View, cx: &mut App) {
         let (current, title) = match view {
             View::Settings(_) => (&mut self.settings, "ClipServe Settings"),

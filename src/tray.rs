@@ -4,7 +4,10 @@ use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem},
 };
 
-use crate::app::{Action, Command, Wake};
+use crate::{
+    app::{Action, Command},
+    platform::{AUTOSTART_LABEL, Wake},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Status {
@@ -28,7 +31,7 @@ impl Tray {
         let copy = MenuItem::new("Copy latest image URL", false, None);
         let recent = MenuItem::new("Recent images...", true, None);
         let settings = MenuItem::new("Settings...", true, None);
-        let autostart = CheckMenuItem::new("Start with Windows", true, false, None);
+        let autostart = CheckMenuItem::new(AUTOSTART_LABEL, true, false, None);
         let exit = MenuItem::new("Exit", true, None);
         let menu = Menu::with_items(&[&enabled, &copy, &recent, &settings, &autostart, &exit])?;
         let icon = TrayIconBuilder::new()
@@ -74,7 +77,7 @@ impl Tray {
     }
 
     pub fn update(&mut self, status: Status, force: bool) {
-        // Windows check items can toggle themselves before the app accepts a change.
+        // A check item can toggle itself before the app accepts a change.
         self.enabled.set_checked(status.enabled);
         self.autostart.set_checked(status.autostart);
         self.copy.set_enabled(status.healthy && status.count != 0);

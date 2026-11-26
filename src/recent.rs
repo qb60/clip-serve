@@ -20,9 +20,9 @@ use gpui_component::{
 };
 
 use crate::{
-    app::{Command, ImageAction, Wake},
-    clipboard,
+    app::{Command, ImageAction},
     desktop::window_options,
+    platform::{Wake, clipboard},
 };
 
 const TILE_WIDTH: f32 = 150.;

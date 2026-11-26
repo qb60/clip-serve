@@ -3,11 +3,11 @@
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
-mod autostart;
-#[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
 mod desktop;
+#[cfg(windows)]
+mod platform;
 #[cfg(windows)]
 mod recent;
 #[cfg(windows)]
@@ -17,12 +17,12 @@ mod tray;
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
-    match app::run() {
+    match platform::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
-            app::show_error(&format!(
+            platform::show_error(&format!(
                 "ClipServe could not start or continue.\n\n{}",
-                app::error_detail(err.as_ref())
+                platform::error_detail(err.as_ref())
             ));
             std::process::ExitCode::FAILURE
         }
