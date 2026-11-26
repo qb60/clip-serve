@@ -9,7 +9,7 @@ use gpui::{
     App, AppContext, Bounds, DisplayId, Pixels, QuitMode, Size, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions, px, size,
 };
-use gpui_component::Root;
+use gpui_component::{Root, Theme};
 
 use crate::{
     app::Command,
@@ -64,6 +64,7 @@ impl Desktop {
                     .with_quit_mode(QuitMode::Explicit)
                     .run(move |cx| {
                         gpui_component::init(cx);
+                        Theme::update(cx, |theme| theme.font_size = px(14.));
                         let mut windows = DesktopWindows {
                             settings: None,
                             recent: None,
@@ -137,7 +138,7 @@ impl DesktopWindows {
         }
         let result = match view {
             View::Settings(config) => cx.open_window(
-                window_options(title, size(px(480.), px(272.)), None, None, cx),
+                window_options(title, size(px(390.), px(240.)), None, None, cx),
                 |window, cx| {
                     let editor = cx.new(|cx| Editor::new(config, self.wake.clone(), window, cx));
                     cx.new(|cx| Root::new(editor, window, cx))

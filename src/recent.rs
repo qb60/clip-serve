@@ -14,7 +14,7 @@ use gpui::{
     px, size, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Root, StyledExt,
+    ActiveTheme, Disableable, Root, Sizable, StyledExt,
     button::Button,
     scroll::{Scrollbar, ScrollbarMode},
 };
@@ -317,6 +317,7 @@ impl Render for RecentImages {
                     .py_2()
                     .child(
                         Button::new("clear")
+                            .large()
                             .label("Clear stored images")
                             .outline()
                             .disabled(no_images || self.confirming)
@@ -327,6 +328,7 @@ impl Render for RecentImages {
                     .child(div().flex_1())
                     .child(
                         Button::new("preview")
+                            .large()
                             .label("Preview")
                             .outline()
                             .disabled(selected.is_none())
@@ -360,6 +362,7 @@ fn image_buttons(wake: &Wake, id: Option<&str>, can_copy: bool) -> [Button; 2] {
         let wake = wake.clone();
         let id = id.map(str::to_owned);
         Button::new(key)
+            .large()
             .label(label)
             .outline()
             .disabled(!enabled || id.is_none())

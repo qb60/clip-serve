@@ -146,12 +146,14 @@ impl Render for Editor {
             |_| "Enter a valid address, port and image count.".to_owned(),
             |config| store::url(config.endpoint(), "k7Fp2xQ9"),
         );
+        let row_height = px(22.);
         let fields = ["Local IPv4 address", "Port", "Maximum images"]
             .into_iter()
             .zip(self.fields.iter())
             .map(|(label, field)| {
                 div()
                     .flex()
+                    .h(row_height)
                     .items_center()
                     .gap_3()
                     .child(
@@ -187,24 +189,30 @@ impl Render for Editor {
                             .gap_1()
                             .children(fields)
                             .child(
-                                Checkbox::new("capture")
-                                    .label("Enable capture when ClipServe starts")
-                                    .checked(self.capture_on_startup)
-                                    .disabled(self.pending)
-                                    .on_change(cx.listener(|this, value: &bool, _, cx| {
-                                        this.capture_on_startup = *value;
-                                        cx.notify();
-                                    })),
+                                div().flex().h(row_height).items_center().child(
+                                    Checkbox::new("capture")
+                                        .text_base()
+                                        .label("Enable capture when ClipServe starts")
+                                        .checked(self.capture_on_startup)
+                                        .disabled(self.pending)
+                                        .on_change(cx.listener(|this, value: &bool, _, cx| {
+                                            this.capture_on_startup = *value;
+                                            cx.notify();
+                                        })),
+                                ),
                             )
                             .child(
-                                Checkbox::new("autostart")
-                                    .label(AUTOSTART_LABEL)
-                                    .checked(self.autostart)
-                                    .disabled(self.pending)
-                                    .on_change(cx.listener(|this, value: &bool, _, cx| {
-                                        this.autostart = *value;
-                                        cx.notify();
-                                    })),
+                                div().flex().h(row_height).items_center().child(
+                                    Checkbox::new("autostart")
+                                        .text_base()
+                                        .label(AUTOSTART_LABEL)
+                                        .checked(self.autostart)
+                                        .disabled(self.pending)
+                                        .on_change(cx.listener(|this, value: &bool, _, cx| {
+                                            this.autostart = *value;
+                                            cx.notify();
+                                        })),
+                                ),
                             )
                             .child(
                                 div()
@@ -240,6 +248,7 @@ impl Render for Editor {
                     .py_2()
                     .child(
                         Button::new("ok")
+                            .large()
                             .label("OK")
                             .min_w(px(84.))
                             .primary()
@@ -250,6 +259,7 @@ impl Render for Editor {
                     )
                     .child(
                         Button::new("cancel")
+                            .large()
                             .label("Cancel")
                             .min_w(px(84.))
                             .outline()
@@ -258,6 +268,7 @@ impl Render for Editor {
                     )
                     .child(
                         Button::new("apply")
+                            .large()
                             .label("Apply")
                             .min_w(px(84.))
                             .outline()
